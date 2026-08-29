@@ -128,7 +128,6 @@ ImageMap::update()
         }
         if (needsUpdate ||
             hasChanged(attrTexture) ||
-            hasChanged(attrGamma) ||
             hasChanged(attrSourceColorSpace) ||
             hasChanged(attrWrapAround) ||
             hasChanged(attrUseDefaultColor) ||
@@ -137,7 +136,6 @@ ImageMap::update()
             if (!mUdimTexture->update(this,
                                       sLogEventRegistry,
                                       get(attrTexture),
-                                      static_cast<ispc::TEXTURE_GammaMode>(get(attrGamma)),
                                       get(attrSourceColorSpace),
                                       wrapS,
                                       wrapT,
@@ -163,14 +161,12 @@ ImageMap::update()
         }
         if (needsUpdate ||
             hasChanged(attrTexture) ||
-            hasChanged(attrGamma) ||
             hasChanged(attrSourceColorSpace) ||
             hasChanged(attrWrapAround) ||
             hasChanged(attrUseDefaultColor) ||
             hasChanged(attrDefaultColor)) {
             std::string errorStr;
             if (!mTexture->update(get(attrTexture),
-                                  static_cast<ispc::TEXTURE_GammaMode>(get(attrGamma)),
                                   get(attrSourceColorSpace),
                                   wrapS,
                                   wrapT,

@@ -23,7 +23,6 @@ public:
     bool update(scene_rdl2::rdl2::Shader *shader,
                 scene_rdl2::rdl2::ShaderLogEventRegistry& logEventRegistry,
                 const std::string &filename,
-                ispc::TEXTURE_GammaMode gammaMode,
                 const std::string& sourceColorSpace,
                 WrapType wrapS,
                 WrapType wrapT,

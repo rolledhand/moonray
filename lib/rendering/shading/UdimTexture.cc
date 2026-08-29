@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "UdimTexture.h"
+#include "TextureColorManagement.h"
 
 #include <moonray/rendering/shading/Shading.h>
 #include <moonray/rendering/shading/Texture.h>
@@ -13,8 +14,6 @@
 #include <moonray/rendering/shading/ThreadLocalObjectState.h>
 #include <moonray/rendering/mcrt_common/ProfileAccumulatorHandles.h>
 #include <moonray/rendering/texturing/sampler/TextureSampler.h>
-
-#include <OpenColorIO/OpenColorIO.h>
 
 #ifdef __ARM_NEON__
 // This works around OIIO including x86 based headers due to detection of SSE
@@ -29,13 +28,10 @@
 #include <tbb/mutex.h>
 
 #include <algorithm>
-#include <cctype>
 #include <dirent.h>
 #include <glob.h>
 #include <memory>
 #include <vector>
-
-namespace OCIO = OCIO_NAMESPACE;
 
 namespace moonray {
 namespace shading {
@@ -122,166 +118,6 @@ getUdimFilenames(const std::string& filename,
 
 } // namespace
 
-namespace {
-
-std::string
-trim(std::string value)
-{
-    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
-    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
-    return value;
-}
-
-std::string
-normalized(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) {
-                       if (c == '-' || c == ' ' || c == '.') return '_';
-                       return static_cast<char>(std::tolower(c));
-                   });
-    return value;
-}
-
-bool
-isRawColorSpace(const std::string& value)
-{
-    const std::string key = normalized(value);
-    return key.empty() || key == "raw" || key == "data" || key == "none";
-}
-
-std::string
-colorSpaceName(const OCIO::ConstColorSpaceRcPtr& colorSpace)
-{
-    if (!colorSpace) {
-        return {};
-    }
-    const char* name = colorSpace->getName();
-    return name ? std::string(name) : std::string();
-}
-
-std::string
-resolveColorSpace(const OCIO::ConstConfigRcPtr& config,
-                  const std::string& token)
-{
-    if (!config || token.empty()) {
-        return {};
-    }
-
-    try {
-        std::string name = colorSpaceName(config->getColorSpace(token.c_str()));
-        if (!name.empty()) {
-            return name;
-        }
-    } catch (const OCIO::Exception&) {
-    }
-    return {};
-}
-
-std::string
-roleColorSpace(const OCIO::ConstConfigRcPtr& config, const char* role)
-{
-    return resolveColorSpace(config, role ? role : "");
-}
-
-std::string
-renderingColorSpace(const OCIO::ConstConfigRcPtr& config)
-{
-    for (const char* role : {OCIO::ROLE_RENDERING,
-                             OCIO::ROLE_SCENE_LINEAR,
-                             "default_float",
-                             "reference",
-                             OCIO::ROLE_DEFAULT}) {
-        std::string name = roleColorSpace(config, role);
-        if (!name.empty()) {
-            return name;
-        }
-    }
-    return {};
-}
-
-std::string
-sourceColorSpaceForTexture(const OCIO::ConstConfigRcPtr& config,
-                           const std::string& filename,
-                           const std::string& authoredSource)
-{
-    std::string source = trim(authoredSource);
-    const std::string key = normalized(source);
-
-    if (isRawColorSpace(source)) {
-        return {};
-    }
-
-    if (key == "auto") {
-        if (!config) {
-            return {};
-        }
-        try {
-            const char* resolved = config->getColorSpaceFromFilepath(filename.c_str());
-            if (resolved && !isRawColorSpace(resolved)) {
-                return resolveColorSpace(config, resolved);
-            }
-        } catch (const OCIO::Exception&) {
-        }
-        return {};
-    }
-
-    if (config) {
-        std::string resolved = resolveColorSpace(config, source);
-        if (!resolved.empty() && !isRawColorSpace(resolved)) {
-            return resolved;
-        }
-    }
-    return {};
-}
-
-OCIO::ConstCPUProcessorRcPtr
-createTextureProcessor(const std::string& filename,
-                       const std::string& sourceColorSpace)
-{
-    OCIO::ConstConfigRcPtr config;
-    try {
-        config = OCIO::GetCurrentConfig();
-    } catch (const OCIO::Exception&) {
-        return {};
-    }
-
-    const std::string source = sourceColorSpaceForTexture(config, filename, sourceColorSpace);
-    if (source.empty()) {
-        return {};
-    }
-
-    const std::string target = renderingColorSpace(config);
-    if (target.empty() || source == target) {
-        return {};
-    }
-
-    try {
-        OCIO::ConstProcessorRcPtr processor =
-            config->getProcessor(source.c_str(), target.c_str());
-        return processor ? processor->getDefaultCPUProcessor() : OCIO::ConstCPUProcessorRcPtr();
-    } catch (const OCIO::Exception&) {
-    }
-    return {};
-}
-
-void
-applyOcioProcessor(intptr_t processorPtr, float* rgba)
-{
-    if (!processorPtr || !rgba) {
-        return;
-    }
-    const OCIO::CPUProcessor* processor =
-        reinterpret_cast<const OCIO::CPUProcessor*>(processorPtr);
-    try {
-        processor->applyRGB(rgba);
-    } catch (const OCIO::Exception&) {
-    }
-}
-
-} // namespace
-
 static ispc::UDIM_TEXTURE_StaticData sUdimTextureStaticData;
 
 class UdimTexture::Impl
@@ -292,8 +128,7 @@ public:
         mErrorUdimOutOfRangeU(0),
         mErrorUdimOutOfRangeV(0),
         mErrorSampleFail(0),
-        mNumTextures(0),
-        mIs8bit(false)
+        mNumTextures(0)
     {
         mIspc.mShader = (intptr_t) shader;
         mIspc.mTextureHandles = nullptr;
@@ -359,7 +194,6 @@ public:
     update(scene_rdl2::rdl2::Shader *shader,
            scene_rdl2::rdl2::ShaderLogEventRegistry& logEventRegistry,
            const std::string &filename,
-           ispc::TEXTURE_GammaMode gammaMode,
            const std::string& sourceColorSpace,
            WrapType wrapS,
            WrapType wrapT,
@@ -421,14 +255,10 @@ public:
         mErrorUdimMissingTexture.clear();
         mErrorUdimMissingTexture.resize(mNumTextures);
 
-        bool applyGamma = true;
-
         if (prepareUdimTextureHandles(filename,
                                       udimPos,
                                       logEventRegistry,
                                       errorMsg,
-                                      gammaMode,
-                                      applyGamma,
                                       udimFilenames)) {
             mIspc.mIsValid = true;
         }
@@ -443,13 +273,19 @@ public:
             mTextureOpt[i].twrap = getOIIOWrap(wrapT);
             mTextureOpt[i].subimagename.clear();
         }
-        mIspc.mApplyGamma = applyGamma;
-        mIspc.mIs8bit = mIs8bit;
-        mOcioProcessor = createTextureProcessor(filename, mSourceColorSpace);
-        mIspc.mOcioProcessor = reinterpret_cast<intptr_t>(mOcioProcessor.get());
-        if (mOcioProcessor) {
-            mIspc.mApplyGamma = false;
+        texture_color_management::ProcessorResult processor =
+            texture_color_management::createTextureProcessor(filename, mSourceColorSpace);
+        mOcioProcessor = processor.mProcessor;
+        if (!processor.mDiagnostic.empty()) {
+            if (processor.mDiagnostic.find("method=explicit:unresolved") != std::string::npos ||
+                processor.mDiagnostic.find("method=failed") != std::string::npos ||
+                processor.mDiagnostic.find("OCIO config load failed") != std::string::npos ||
+                processor.mDiagnostic.find("no render/working color space") != std::string::npos ||
+                processor.mDiagnostic.find("targetMethod=role:default") != std::string::npos) {
+                scene_rdl2::logging::Logger::warn("UdimTexture OCIO: ", processor.mDiagnostic);
+            }
         }
+        mIspc.mOcioProcessor = reinterpret_cast<intptr_t>(mOcioProcessor.get());
 
         tbb::mutex errorMutex;
 
@@ -534,13 +370,7 @@ public:
 
         scene_rdl2::math::Color4 result;
         if (res) {
-            if (mIspc.mApplyGamma && mIspc.mIs8bit) {
-                tmp[0] = tmp[0] > 0.0f ? powf(tmp[0], 2.2f) : 0.0f;
-                tmp[1] = tmp[1] > 0.0f ? powf(tmp[1], 2.2f) : 0.0f;
-                tmp[2] = tmp[2] > 0.0f ? powf(tmp[2], 2.2f) : 0.0f;
-                // don't gamma the alpha channel
-            }
-            applyOcioProcessor(mIspc.mOcioProcessor, tmp);
+            texture_color_management::applyProcessor(mIspc.mOcioProcessor, tmp);
             result[0] = tmp[0];
             result[1] = tmp[1];
             result[2] = tmp[2];
@@ -569,8 +399,6 @@ public:
             textureSampler->unregisterMapForInvalidation(mShader);
         }
 
-        mIspc.mApplyGamma = false;
-        mIspc.mIs8bit = false;
         mIspc.mOcioProcessor = 0;
         mIspc.mIsValid = false;
         mOcioProcessor.reset();
@@ -593,7 +421,8 @@ public:
             logEvent(mErrorUdimOutOfRangeV);
             return -1;
         }
-        return int(u) + int(v) * sMaxUdim;
+        const int tileV = int(std::max(0.0f, v - 1.0e-5f));
+        return int(u) + tileV * sMaxUdim;
     }
 
     const ispc::UDIM_TEXTURE_Data& getUdimTextureData() const {
@@ -649,9 +478,7 @@ private:
                              int idx,
                              int &firstUdimChannelCount,
                              int &firstUdimFileFormat,
-                             std::string &errorMsg,
-                             ispc::TEXTURE_GammaMode gammaMode,
-                             bool& applyGamma)
+                             std::string &errorMsg)
     {
         std::string errorString;
         texture::TextureSampler *textureSampler = texture::getTextureSampler();
@@ -697,12 +524,8 @@ private:
         std::shared_ptr<OIIO::TextureSystem> textureSystem = textureSampler->getTextureSystem();
 #       endif
         textureSystem->get_imagespec(ufilename, 0, spec);
-        mIs8bit = (spec.format == OIIO::TypeDesc::UINT8);
         mWidths[idx] = spec.width;
         mHeights[idx] = spec.height;
-
-        // Don't apply gamma if any of the images are single channel
-        applyGamma = applyGamma ? getApplyGamma(gammaMode, spec.nchannels) : false;
 
         mPixelAspectRatios[idx] = spec.get_float_attribute("PixelAspectRatio", 1.0f);
 
@@ -714,8 +537,6 @@ private:
                               const std::size_t uDimPos,
                               scene_rdl2::rdl2::ShaderLogEventRegistry& logEventRegistry,
                               std::string &errorMsg,
-                              ispc::TEXTURE_GammaMode gammaMode,
-                              bool& applyGamma,
                               std::vector<std::string>& udimFilenames)
     {
         std::string udimFileName = filename;
@@ -730,9 +551,7 @@ private:
                                               idx,
                                               firstUdimChannelCount,
                                               firstUdimFileFormat,
-                                              errorMsg,
-                                              gammaMode,
-                                              applyGamma)) {
+                                              errorMsg)) {
                     return false;
                 }
             } else {
@@ -776,7 +595,6 @@ private:
     std::vector<int> mWidths;
     std::vector<int> mHeights;
     std::vector<float> mPixelAspectRatios;
-    bool mIs8bit;
 
     static std::atomic<bool> mUdimMissingTextureWarningSwitch;
 };
@@ -809,7 +627,6 @@ bool
 UdimTexture::update(scene_rdl2::rdl2::Shader *shader,
                     scene_rdl2::rdl2::ShaderLogEventRegistry& logEventRegistry,
                     const std::string &filename,
-                    ispc::TEXTURE_GammaMode gammaMode,
                     const std::string& sourceColorSpace,
                     WrapType wrapS,
                     WrapType wrapT,
@@ -821,7 +638,6 @@ UdimTexture::update(scene_rdl2::rdl2::Shader *shader,
     return mImpl->update(shader,
                          logEventRegistry,
                          filename,
-                         gammaMode,
                          sourceColorSpace,
                          wrapS,
                          wrapT,
@@ -945,13 +761,7 @@ void CPP_oiioUdimTexture(const ispc::UDIM_TEXTURE_Data *tx,
                                result);
 
     if (res) {
-        if (tx->mApplyGamma && tx->mIs8bit) {
-            result[0] = result[0] > 0.0f ? powf(result[0], 2.2f) : 0.0f;
-            result[1] = result[1] > 0.0f ? powf(result[1], 2.2f) : 0.0f;
-            result[2] = result[2] > 0.0f ? powf(result[2], 2.2f) : 0.0f;
-            // don't gamma the alpha channel
-        }
-        applyOcioProcessor(tx->mOcioProcessor, result);
+        texture_color_management::applyProcessor(tx->mOcioProcessor, result);
     } else {
         scene_rdl2::rdl2::Shader::getLogEventRegistry().log(shader, tx->mErrorSampleFail);
         result[0] = result[1] = result[2] = result[3] = 0.f;

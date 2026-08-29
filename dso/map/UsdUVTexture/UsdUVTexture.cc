@@ -23,6 +23,9 @@ static ispc::StaticUsdUVTextureData sStaticUsdUVTextureData;
 
 namespace {
 
+constexpr int sSourceColorSpaceRaw = 0;
+constexpr int sSourceColorSpaceSrgb = 1;
+
 std::string
 sourceColorSpaceFromUsdEnum(const int sourceColorSpace, const std::string& overrideValue)
 {
@@ -31,11 +34,10 @@ sourceColorSpaceFromUsdEnum(const int sourceColorSpace, const std::string& overr
     }
 
     switch (sourceColorSpace) {
-    case ispc::TEXTURE_GAMMA_OFF:
+    case sSourceColorSpaceRaw:
         return "raw";
-    case ispc::TEXTURE_GAMMA_ON:
+    case sSourceColorSpaceSrgb:
         return "sRGB";
-    case ispc::TEXTURE_GAMMA_USD:
     default:
         return "auto";
     }
@@ -137,7 +139,6 @@ UsdUVTexture::update()
             if (!mUdimTexture->update(this,
                                       sLogEventRegistry,
                                       filename,
-                                      static_cast<ispc::TEXTURE_GammaMode>(get(attrSourceColorSpace)),
                                       sourceColorSpace,
                                       wrapS,
                                       wrapT,
@@ -170,7 +171,6 @@ UsdUVTexture::update()
             hasChanged(attrFallback)) {
 
             if (!mTexture->update(filename,
-                                  static_cast<ispc::TEXTURE_GammaMode>(get(attrSourceColorSpace)),
                                   sourceColorSpace,
                                   wrapS,
                                   wrapT,

@@ -40,6 +40,7 @@ target_sources(${component}
         ShadingUtil.cc
         State.cc
         Texture.cc
+        TextureColorManagement.cc
         UdimTexture.cc
         Xform.cc
         bsdf/Bsdf.cc
@@ -99,6 +100,7 @@ set_property(TARGET ${component}
         State.h
         ColorCorrect.h
         Iridescence.h
+        TextureColorManagement.h
         UdimTexture.h
         Util.h
         Xform.h

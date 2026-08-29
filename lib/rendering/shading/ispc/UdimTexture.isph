@@ -37,8 +37,6 @@ struct UDIM_TEXTURE_Data
     uniform Color                               mFatalColor;
     uniform UDIM_TEXTURE_StaticData* uniform    mUdimTextureStaticDataPtr;
     uniform intptr_t                            mTextureOptions;
-    uniform bool                                mApplyGamma;
-    uniform bool                                mIs8bit;
     uniform intptr_t                            mOcioProcessor;
 };
 
@@ -71,4 +69,3 @@ float
 UDIM_TEXTURE_getPixelAspectRatio(
     const uniform UDIM_TEXTURE_Data * uniform tx,
     int udim);
-
